@@ -31,6 +31,14 @@ export const alicesw = () =>
     coverUrl:
       (document.querySelector("div.pic > img.fengmian2") as HTMLImageElement)
         .src || null,
+    additionalMetadatePatch: (additionalMetadate) => {
+      additionalMetadate.tags = Array.from(
+        document.querySelectorAll(".tags_list > a"),
+      ).map((a) =>
+        ((a as HTMLElement).innerText || "").replace(/^#/, "").trim(),
+      );
+      return additionalMetadate;
+    },
     getIndexUrls: () => {
       const chapterPageLink = document.querySelector(
         "div.book_newchap > div.tit a",

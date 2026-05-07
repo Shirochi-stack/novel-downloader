@@ -16,6 +16,9 @@ interface MkRuleClassOptions {
   introDom?: HTMLElement;
   introDomPatch?: (introDom: HTMLElement) => HTMLElement;
   coverUrl: string | null;
+  additionalMetadatePatch?: (
+    additionalMetadate: BookAdditionalMetadate,
+  ) => BookAdditionalMetadate;
   getIndexUrls?: () => string[] | Promise<string[]>;
   getIndexPages?: () => Promise<(Document | null)[]>;
   getAList: (doc: Document) => NodeListOf<Element>;
@@ -30,7 +33,7 @@ interface MkRuleClassOptions {
   getContentFromUrl?: (
     chapterUrl: string,
     chapterName: string | null,
-    charset: string
+    charset: string,
   ) => Promise<HTMLElement | null>;
   getContent?: (doc: Document) => HTMLElement | null;
   contentPatch: (content: HTMLElement) => HTMLElement;
@@ -51,6 +54,7 @@ export function mkRuleClass({
   introDom,
   introDomPatch,
   coverUrl,
+  additionalMetadatePatch,
   getIndexUrls,
   getIndexPages,
   getAList,
@@ -98,12 +102,12 @@ export function mkRuleClass({
     public async bookParse() {
       let [introduction, introductionHTML]: [
         string | null,
-        HTMLElement | null
+        HTMLElement | null,
       ] = [null, null];
       if (introDom && introDomPatch) {
         [introduction, introductionHTML] = await introDomHandle(
           introDom,
-          introDomPatch
+          introDomPatch,
         );
       }
       const additionalMetadate: BookAdditionalMetadate = {
@@ -115,6 +119,12 @@ export function mkRuleClass({
             additionalMetadate.cover = coverClass;
           })
           .catch((error) => log.error(error));
+      }
+      if (additionalMetadatePatch) {
+        Object.assign(
+          additionalMetadate,
+          additionalMetadatePatch(additionalMetadate),
+        );
       }
 
       let indexPages: (Document | null)[] = [];
@@ -132,7 +142,7 @@ export function mkRuleClass({
               const doc = await getHtmlDomWithRetry(url, this.charset);
               _indexPage.push([doc, url]);
               return doc;
-            }
+            },
           );
           indexPages = _indexPage
             .sort(
@@ -141,7 +151,7 @@ export function mkRuleClass({
                 const bUrl = b[1];
                 // https://stackoverflow.com/questions/13304543/javascript-sort-array-based-on-another-array
                 return indexUrls.indexOf(aUrl) - indexUrls.indexOf(bUrl);
-              }
+              },
             )
             .map((l) => l[0]);
         }
@@ -235,7 +245,7 @@ export function mkRuleClass({
       isVIP: boolean,
       isPaid: boolean,
       charset: string,
-      options: object
+      options: object,
     ) {
       let content;
       if (typeof getContentFromUrl === "function") {
@@ -251,7 +261,7 @@ export function mkRuleClass({
         const { dom, text, images } = await cleanDOM(
           content,
           "TM",
-          cleanDomOptions
+          cleanDomOptions,
         );
         return {
           chapterName,
