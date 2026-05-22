@@ -19,6 +19,8 @@ const SFACG_API_DEVICE_TOKEN = "910D166A-736E-3231-8B21-8D12DFD75F16";
 const SFACG_API_SALT = "lPQDb9AKO7$LjkPG";
 const SFACG_API_AUTHORIZATION =
   "Basic YW5kcm9pZHVzZXI6MWEjJDUxLXl0Njk7KkFjdkBxeHE=";
+const SFACG_API_SIGN_RETRY_LIMIT = Math.max(retryLimit, 20);
+let sfacgApiNonce: string | null = null;
 
 interface SfacgApiChapterResponse {
   status?: {
@@ -107,8 +109,8 @@ function getSfacgApiContent(data: SfacgApiChapterResponse["data"]) {
 
 async function getSfacgApiChapter(chapterId: string) {
   const url = `https://api.sfacg.com/Chaps/${chapterId}?expand=content%2Cexpand.content`;
-  for (let retry = 0; retry < retryLimit; retry++) {
-    const nonce = createSfacgNonce();
+  for (let retry = 0; retry < SFACG_API_SIGN_RETRY_LIMIT; retry++) {
+    const nonce = sfacgApiNonce ?? createSfacgNonce();
     const timestamp = Date.now();
     const sign = getSfacgApiSign(nonce, timestamp);
     const sfsecurity = `nonce=${nonce}&timestamp=${timestamp}&devicetoken=${SFACG_API_DEVICE_TOKEN}&sign=${sign}`;
@@ -125,13 +127,27 @@ async function getSfacgApiChapter(chapterId: string) {
     const data = JSON.parse(response.responseText) as SfacgApiChapterResponse;
     const httpCode = data.status?.httpCode;
     if (httpCode === 200 && data.data) {
+      sfacgApiNonce = nonce;
       return data.data;
     }
     if (httpCode === 417) {
-      log.warn(
-        `[sfacg] API signature rejected, retry ${retry + 1}/${retryLimit}`,
-      );
+      sfacgApiNonce = null;
+      if (
+        retry === 0 ||
+        retry % 5 === 4 ||
+        retry === SFACG_API_SIGN_RETRY_LIMIT - 1
+      ) {
+        log.warn(
+          `[sfacg] API signature rejected (not a purchase check), rotating nonce ${retry + 1}/${SFACG_API_SIGN_RETRY_LIMIT}`,
+        );
+      }
       continue;
+    }
+    if (httpCode === 401 || httpCode === 403) {
+      log.warn(
+        `[sfacg] API chapter ${chapterId} requires an app session with access (${httpCode})`,
+      );
+      return null;
     }
     log.warn(`[sfacg] API chapter ${chapterId} returned ${httpCode}`);
     return null;
