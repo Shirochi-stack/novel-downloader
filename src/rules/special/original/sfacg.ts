@@ -20,7 +20,10 @@ const SFACG_API_SALT = "lPQDb9AKO7$LjkPG";
 const SFACG_API_AUTHORIZATION =
   "Basic YW5kcm9pZHVzZXI6MWEjJDUxLXl0Njk7KkFjdkBxeHE=";
 const SFACG_API_SIGN_RETRY_LIMIT = Math.max(retryLimit, 20);
+const SFACG_API_NONCE_TEST_URL =
+  "https://api.sfacg.com/Chaps/8436696?expand=content%2Cexpand.content";
 let sfacgApiNonce: string | null = null;
+let sfacgApiNoncePromise: Promise<string | null> | null = null;
 
 interface SfacgApiChapterResponse {
   status?: {
@@ -107,24 +110,75 @@ function getSfacgApiContent(data: SfacgApiChapterResponse["data"]) {
     .join("");
 }
 
+function getSfacgApiHeaders(nonce: string) {
+  const timestamp = Date.now();
+  const sign = getSfacgApiSign(nonce, timestamp);
+  const sfsecurity = `nonce=${nonce}&timestamp=${timestamp}&devicetoken=${SFACG_API_DEVICE_TOKEN}&sign=${sign}`;
+  return {
+    accept: "application/vnd.sfacg.api+json;version=1",
+    "accept-charset": "UTF-8",
+    "accept-encoding": "gzip",
+    authorization: SFACG_API_AUTHORIZATION,
+    "content-type": "application/json; charset=UTF-8",
+    sfsecurity,
+    "user-agent": `boluobao/5.2.16(android;35)/OPPO/${SFACG_API_DEVICE_TOKEN.toLowerCase()}/OPPO`,
+  };
+}
+
+async function requestSfacgApi(url: string, nonce: string) {
+  const response = await gfetch(url, {
+    method: "GET",
+    headers: getSfacgApiHeaders(nonce),
+  });
+  return JSON.parse(response.responseText) as SfacgApiChapterResponse;
+}
+
+async function initSfacgApiNonce() {
+  if (sfacgApiNonce) {
+    return sfacgApiNonce;
+  }
+  if (sfacgApiNoncePromise) {
+    return sfacgApiNoncePromise;
+  }
+  sfacgApiNoncePromise = (async () => {
+    for (let retry = 0; retry < SFACG_API_SIGN_RETRY_LIMIT; retry++) {
+      const nonce = createSfacgNonce();
+      try {
+        const data = await requestSfacgApi(SFACG_API_NONCE_TEST_URL, nonce);
+        if (data.status?.httpCode !== 417) {
+          sfacgApiNonce = nonce;
+          log.info(`[sfacg] initialized app API nonce`);
+          return nonce;
+        }
+      } catch (error) {
+        log.warn(`[sfacg] API nonce probe failed`, error);
+      }
+      if (
+        retry === 0 ||
+        retry % 5 === 4 ||
+        retry === SFACG_API_SIGN_RETRY_LIMIT - 1
+      ) {
+        log.warn(
+          `[sfacg] API nonce rejected, retry ${retry + 1}/${SFACG_API_SIGN_RETRY_LIMIT}`,
+        );
+      }
+      await new Promise((resolve) => setTimeout(resolve, 500));
+    }
+    return null;
+  })().finally(() => {
+    sfacgApiNoncePromise = null;
+  });
+  return sfacgApiNoncePromise;
+}
+
 async function getSfacgApiChapter(chapterId: string) {
   const url = `https://api.sfacg.com/Chaps/${chapterId}?expand=content%2Cexpand.content`;
   for (let retry = 0; retry < SFACG_API_SIGN_RETRY_LIMIT; retry++) {
-    const nonce = sfacgApiNonce ?? createSfacgNonce();
-    const timestamp = Date.now();
-    const sign = getSfacgApiSign(nonce, timestamp);
-    const sfsecurity = `nonce=${nonce}&timestamp=${timestamp}&devicetoken=${SFACG_API_DEVICE_TOKEN}&sign=${sign}`;
-    const response = await gfetch(url, {
-      method: "GET",
-      headers: {
-        accept: "application/vnd.sfacg.api+json;version=1",
-        authorization: SFACG_API_AUTHORIZATION,
-        "content-type": "application/json; charset=UTF-8",
-        sfsecurity,
-        "user-agent": `boluobao/5.2.16(android;35)/OPPO/${SFACG_API_DEVICE_TOKEN.toLowerCase()}/OPPO`,
-      },
-    });
-    const data = JSON.parse(response.responseText) as SfacgApiChapterResponse;
+    const nonce = await initSfacgApiNonce();
+    if (!nonce) {
+      return null;
+    }
+    const data = await requestSfacgApi(url, nonce);
     const httpCode = data.status?.httpCode;
     if (httpCode === 200 && data.data) {
       sfacgApiNonce = nonce;
