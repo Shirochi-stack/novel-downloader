@@ -159,6 +159,24 @@ function buildTextChapter(
   };
 }
 
+function removeInvalidSfacgImages(content: HTMLElement) {
+  for (const img of Array.from(content.querySelectorAll("img"))) {
+    const src = img.getAttribute("src") ?? "";
+    const dataSrc = img.getAttribute("data-src") ?? "";
+    const resolvedSrc = (img as HTMLImageElement).src ?? "";
+    const source = `${src} ${dataSrc} ${resolvedSrc}`.toLowerCase();
+    if (
+      source.includes("file:/") ||
+      /(^|\s|images)[a-z]:[\\/]/.test(source) ||
+      source.includes("\\\\")
+    ) {
+      log.warn(`[sfacg] skipping invalid local image reference: ${src}`);
+      img.remove();
+    }
+  }
+  return content;
+}
+
 export class Sfacg extends BaseRuleClass {
   public constructor() {
     super();
@@ -299,6 +317,7 @@ export class Sfacg extends BaseRuleClass {
       ).innerText.trim();
       const content = doc.querySelector(".article-content") as HTMLElement;
       if (content) {
+        removeInvalidSfacgImages(content);
         const { dom, text, images } = await cleanDOM(content, "TM");
         return {
           chapterName,
