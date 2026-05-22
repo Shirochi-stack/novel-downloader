@@ -1,9 +1,10 @@
+import * as CryptoJS from "crypto-js";
 import {
   getAttachment,
   putAttachmentClassCache,
 } from "../../../lib/attachments";
 import { cleanDOM } from "../../../lib/cleanDOM";
-import { getHtmlDOM } from "../../../lib/http";
+import { getHtmlDOM, gfetch } from "../../../lib/http";
 import { rm } from "../../../lib/dom";
 import { getSectionName, introDomHandle } from "../../../lib/rule";
 import { log } from "../../../log";
@@ -13,6 +14,150 @@ import { Chapter } from "../../../main/Chapter";
 import { Book, BookAdditionalMetadate } from "../../../main/Book";
 import { BaseRuleClass, ChapterParseObject } from "../../../rules";
 import { retryLimit } from "../../../setting";
+
+const SFACG_API_DEVICE_TOKEN = "910D166A-736E-3231-8B21-8D12DFD75F16";
+const SFACG_API_SALT = "lPQDb9AKO7$LjkPG";
+const SFACG_API_AUTHORIZATION =
+  "Basic YW5kcm9pZHVzZXI6MWEjJDUxLXl0Njk7KkFjdkBxeHE=";
+
+interface SfacgApiChapterResponse {
+  status?: {
+    httpCode?: number;
+  };
+  data?: {
+    title?: string;
+    content?: string;
+    expand?: {
+      content?: string;
+    };
+  };
+}
+
+function createSfacgNonce() {
+  if (globalThis.crypto?.randomUUID) {
+    return globalThis.crypto.randomUUID().toUpperCase();
+  }
+  return "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx"
+    .replace(/[xy]/g, (char) => {
+      const random = Math.floor(Math.random() * 16);
+      const value = char === "x" ? random : (random & 0x3) | 0x8;
+      return value.toString(16);
+    })
+    .toUpperCase();
+}
+
+function getSfacgApiSign(nonce: string, timestamp: number) {
+  const longNonce = nonce.repeat(4);
+  const indexCalc = (index: number) => {
+    const charCode = longNonce.charCodeAt(index);
+    return charCode - Math.floor(charCode / 0x24) * 0x24;
+  };
+  const nonceReorder =
+    longNonce.slice(indexCalc(1), indexCalc(1) + 13) +
+    longNonce.slice(indexCalc(2), indexCalc(2) + 16) +
+    longNonce.slice(indexCalc(3), indexCalc(3) + 36) +
+    longNonce.slice(indexCalc(4), indexCalc(4) + 36);
+
+  const authString =
+    String(timestamp) + SFACG_API_SALT + SFACG_API_DEVICE_TOKEN + nonce;
+  let result = "";
+  for (let i = 0; i < authString.length; i++) {
+    result += String.fromCharCode(
+      (authString.charCodeAt(i) + nonceReorder.charCodeAt(i)) >> 1,
+    );
+  }
+
+  const parts = [
+    result.slice(0, 13),
+    result.slice(13, 29),
+    result.slice(29, 65),
+    result.slice(65),
+  ];
+  const stringAfterReorder = parts[3] + parts[0] + parts[2] + parts[1];
+
+  let final = "";
+  for (const char of stringAfterReorder) {
+    const charCode = char.charCodeAt(0);
+    if (charCode < 0x30) {
+      final +=
+        0x39 < charCode + 19 && charCode + 19 < 0x41
+          ? String.fromCharCode(0x39)
+          : String.fromCharCode(charCode + 19);
+    } else if (
+      (0x39 < charCode && charCode < 0x41) ||
+      (0x5a < charCode && charCode < 0x61)
+    ) {
+      final += String.fromCharCode(charCode + 19);
+    } else {
+      final += char;
+    }
+  }
+
+  return CryptoJS.MD5(final).toString(CryptoJS.enc.Hex).toUpperCase();
+}
+
+function getSfacgApiContent(data: SfacgApiChapterResponse["data"]) {
+  if (!data) {
+    return "";
+  }
+  return [data.content, data.expand?.content]
+    .filter((content): content is string => typeof content === "string")
+    .join("");
+}
+
+async function getSfacgApiChapter(chapterId: string) {
+  const url = `https://api.sfacg.com/Chaps/${chapterId}?expand=content%2Cexpand.content`;
+  for (let retry = 0; retry < retryLimit; retry++) {
+    const nonce = createSfacgNonce();
+    const timestamp = Date.now();
+    const sign = getSfacgApiSign(nonce, timestamp);
+    const sfsecurity = `nonce=${nonce}&timestamp=${timestamp}&devicetoken=${SFACG_API_DEVICE_TOKEN}&sign=${sign}`;
+    const response = await gfetch(url, {
+      method: "GET",
+      headers: {
+        accept: "application/vnd.sfacg.api+json;version=1",
+        authorization: SFACG_API_AUTHORIZATION,
+        "content-type": "application/json; charset=UTF-8",
+        sfsecurity,
+        "user-agent": `boluobao/5.2.16(android;35)/OPPO/${SFACG_API_DEVICE_TOKEN.toLowerCase()}/OPPO`,
+      },
+    });
+    const data = JSON.parse(response.responseText) as SfacgApiChapterResponse;
+    const httpCode = data.status?.httpCode;
+    if (httpCode === 200 && data.data) {
+      return data.data;
+    }
+    if (httpCode === 417) {
+      log.warn(
+        `[sfacg] API signature rejected, retry ${retry + 1}/${retryLimit}`,
+      );
+      continue;
+    }
+    log.warn(`[sfacg] API chapter ${chapterId} returned ${httpCode}`);
+    return null;
+  }
+  return null;
+}
+
+function buildTextChapter(
+  chapterName: string | null,
+  contentText: string,
+): ChapterParseObject {
+  const contentHTML = document.createElement("div");
+  for (const line of contentText.split(/\r?\n/)) {
+    const p = document.createElement("p");
+    p.textContent = line;
+    contentHTML.appendChild(p);
+  }
+  return {
+    chapterName,
+    contentRaw: contentHTML,
+    contentText,
+    contentHTML,
+    contentImages: null,
+    additionalMetadate: null,
+  };
+}
 
 export class Sfacg extends BaseRuleClass {
   public constructor() {
@@ -46,7 +191,7 @@ export class Sfacg extends BaseRuleClass {
         .catch((error) => log.error(error));
     }
     additionalMetadate.tags = Array.from(
-      dom.querySelectorAll("ul.tag-list > li.tag > a")
+      dom.querySelectorAll("ul.tag-list > li.tag > a"),
     ).map((a) => {
       rm("span.icn", false, a as HTMLAnchorElement);
       return (a as HTMLAnchorElement).innerText.trim().replace(/\(\d+\)$/, "");
@@ -60,7 +205,7 @@ export class Sfacg extends BaseRuleClass {
         const beitou = new AttachmentClass(
           beitouUrl,
           `beitou.${beitouUrl.split(".").slice(-1)[0]}`,
-          "TM"
+          "TM",
         );
         beitou.init();
         additionalMetadate.attachments = [beitou];
@@ -143,7 +288,7 @@ export class Sfacg extends BaseRuleClass {
     isVIP: boolean,
     isPaid: boolean,
     charset: string,
-    options: object
+    options: object,
   ) {
     const chapterId = chapterUrl.split("/").slice(-2, -1)[0];
 
@@ -176,17 +321,31 @@ export class Sfacg extends BaseRuleClass {
     }
 
     async function vipChapter(): Promise<ChapterParseObject> {
+      async function apiTextChapter(): Promise<ChapterParseObject | null> {
+        try {
+          const data = await getSfacgApiChapter(chapterId);
+          const contentText = getSfacgApiContent(data);
+          if (!contentText.trim()) {
+            return null;
+          }
+          return buildTextChapter(data?.title ?? chapterName, contentText);
+        } catch (error) {
+          log.warn(`[sfacg] API text chapter failed: ${chapterUrl}`, error);
+          return null;
+        }
+      }
+
       async function getvipChapterImage(
         vipChapterImageUrl: string,
-        vipChapterName: string
+        vipChapterName: string,
       ) {
         let retryTime = 0;
 
         function fetchVipChapterImage(
-          vipChapterImageUrlI: string
+          vipChapterImageUrlI: string,
         ): Promise<Blob | null | void> {
           log.debug(
-            `[Chapter]请求 ${vipChapterImageUrlI} Referer ${chapterUrl} 重试次数 ${retryTime}`
+            `[Chapter]请求 ${vipChapterImageUrlI} Referer ${chapterUrl} 重试次数 ${retryTime}`,
           );
 
           return fetch(vipChapterImageUrlI, {
@@ -204,7 +363,7 @@ export class Sfacg extends BaseRuleClass {
             .then((blob) => {
               if (blob.size === 53658 || blob.size === 42356) {
                 log.error(
-                  `[Chapter]请求 ${vipChapterImageUrlI} 失败 Referer ${chapterUrl}`
+                  `[Chapter]请求 ${vipChapterImageUrlI} 失败 Referer ${chapterUrl}`,
                 );
                 if (retryTime < retryLimit) {
                   retryTime++;
@@ -219,13 +378,12 @@ export class Sfacg extends BaseRuleClass {
             .catch((error) => log.error(error));
         }
 
-        const vipChapterImageBlob = await fetchVipChapterImage(
-          vipChapterImageUrl
-        );
+        const vipChapterImageBlob =
+          await fetchVipChapterImage(vipChapterImageUrl);
         const vipChapterImage = new AttachmentClass(
           vipChapterImageUrl,
           vipChapterName,
-          "naive"
+          "naive",
         );
         if (vipChapterImageBlob) {
           vipChapterImage.Blob = vipChapterImageBlob;
@@ -234,6 +392,11 @@ export class Sfacg extends BaseRuleClass {
           vipChapterImage.status = Status.failed;
         }
         return vipChapterImage;
+      }
+
+      const apiChapter = await apiTextChapter();
+      if (apiChapter) {
+        return apiChapter;
       }
 
       const isLogin =
@@ -248,14 +411,14 @@ export class Sfacg extends BaseRuleClass {
         isPaid = dom.querySelector(".pay-section") === null;
         if (isPaid) {
           const vipChapterDom = dom.querySelector(
-            ".article-content > #vipImage"
+            ".article-content > #vipImage",
           ) as HTMLImageElement;
           if (vipChapterDom) {
             const vipChapterImageUrl = vipChapterDom.src;
             const vipChapterName = `vipCHapter${chapterId}.gif`;
             const vipChapterImage = await getvipChapterImage(
               vipChapterImageUrl,
-              vipChapterName
+              vipChapterName,
             );
             putAttachmentClassCache(vipChapterImage);
             const contentImages = [vipChapterImage];
