@@ -821,13 +821,24 @@ export class Jjwxc extends BaseRuleClass {
       const doc = await getHtmlDOM(chapterUrl, charset);
       const content = doc.querySelector("div.novelbody > div") as HTMLElement;
       if (content) {
+        // Extract actual chapter text from paragraph_comment_content div
+        // before removing divs (JJ now wraps chapter text inside a div)
+        const pcc = content.querySelector("#paragraph_comment_content") as HTMLElement | null;
+        if (pcc) {
+          // Move pcc children (text nodes, <p>, <br> etc.) directly into content
+          while (pcc.firstChild) {
+            content.insertBefore(pcc.firstChild, pcc);
+          }
+          pcc.remove();
+        }
+
         rm("hr", true, content);
-        const rawAuthorSayDom = content.querySelector("div.danmu_total_str");
+        const rawAuthorSayDom = content.querySelector("div.danmu_total_str") || content.querySelector("#note_danmu_wrapper");
         let authorSayDom;
         let authorSayText;
         if (rawAuthorSayDom) {
           const { dom: adom, text: atext } = await cleanDOM(
-            rawAuthorSayDom,
+            rawAuthorSayDom as HTMLElement,
             "TM"
           );
           [authorSayDom, authorSayText] = [adom, atext];
