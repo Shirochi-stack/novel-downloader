@@ -14,7 +14,7 @@ import { Chapter } from "../../../main/Chapter";
 import { Book, BookAdditionalMetadate } from "../../../main/Book";
 import { BaseRuleClass, ChapterParseObject } from "../../../rules";
 import { retryLimit } from "../../../setting";
-import { replaceJjwxcCharacter } from "../../lib/jjwxcFontDecode";
+import { buildFontTableViaOCR } from "../../lib/jjwxcFontDecode";
 import { UnsafeWindow } from "../../../global";
 import { _GM_xmlhttpRequest } from "../../../lib/GM";
 
@@ -833,6 +833,14 @@ export class Jjwxc extends BaseRuleClass {
         }
 
         rm("hr", true, content);
+        // #message 是晋江 AJAX 状态占位符：<span id="message" style="display:none">请稍候</span>
+        // （onebook.js 只在点击书名时把它设成“请稍候，正在获取数据”）。它既不是正文也不是
+        // 作者有话说（作者有话说在 #note_danmu_wrapper），但它是 <span>，rm("div") 不会清理，
+        // cleanDOM 也不按 display:none 过滤，导致“请稍候”混入正文末尾。仅当它仍是占位文本时移除。
+        const messageEl = content.querySelector("#message");
+        if (messageEl && /请稍[候后]/.test(messageEl.textContent ?? "")) {
+          messageEl.remove();
+        }
         const rawAuthorSayDom = content.querySelector("div.danmu_total_str") || content.querySelector("#note_danmu_wrapper");
         let authorSayDom;
         let authorSayText;
@@ -1185,7 +1193,7 @@ export class Jjwxc extends BaseRuleClass {
           // https://github.com/404-novel-project/novel-downloader/issues/521
 
           const cssText = Array.from(doc.querySelectorAll("style"))
-            .map((s) => s.innerText)
+            .map((s) => s.textContent)
             .join("\n");
           const ast = csstree.parse(cssText);
 
@@ -1324,19 +1332,36 @@ export class Jjwxc extends BaseRuleClass {
         let finalText = rawText;
         const fontName = getFontName(doc);
         if (fontName) {
-          // Replace Text using OCR-based font decoding
-          finalText = await replaceJjwxcCharacter(fontName, rawText);
-
-          // Replace DOM innerHTML using OCR-based font decoding
-          const replacedDom = document.createElement("div");
-          replacedDom.innerHTML = await replaceJjwxcCharacter(
-            fontName,
-            rawDom.innerHTML
-          );
-
-          finalDom = replacedDom;
+          const jjwxcFontTable = await buildFontTableViaOCR(fontName, rawText + rawDom.innerHTML);
+          if (jjwxcFontTable) {
+            const applyFontTable = (text: string) => {
+              let out = text;
+              for (const ch in jjwxcFontTable) {
+                if (Object.prototype.hasOwnProperty.call(jjwxcFontTable, ch)) {
+                  out = out.replaceAll(ch, jjwxcFontTable[ch]);
+                }
+              }
+              return out.replace(/\u200C/g, "");
+            };
+            finalText = applyFontTable(rawText);
+            const replacedDom = document.createElement("div");
+            replacedDom.innerHTML = applyFontTable(rawDom.innerHTML);
+            finalDom = replacedDom;
+            return {
+              chapterName: ChapterName,
+              contentRaw: content,
+              contentText: finalText,
+              contentHTML: finalDom,
+              contentImages: images,
+              additionalMetadate: null,
+            };
+          }
         }
-
+        // Font table unavailable; still strip ZWNJ noise
+        finalText = finalText.replace(/\u200C/g, "");
+        const zwnjDom = document.createElement("div");
+        zwnjDom.innerHTML = finalDom.innerHTML.replace(/\u200C/g, "");
+        finalDom = zwnjDom;
         return {
           chapterName: ChapterName,
           contentRaw: content,
@@ -1674,6 +1699,7 @@ export class Jjwxc extends BaseRuleClass {
           postscript,
         ].join("\n\n");
         contentText = postscript.trim().length === 0 ? contentText: [contentText, AUTHOR_SAY_PREFIX, postscript].join("\n\n");
+        contentText = contentText.replace(/\u200C/g, "");
         await sleep(2000 + Math.round(Math.random() * 2000));
         return {
           chapterName,
