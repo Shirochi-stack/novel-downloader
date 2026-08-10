@@ -1,49 +1,93 @@
 import { rm } from "../../../lib/dom";
 import { mkRuleClass } from "../template";
 
-const currentPageIndexBox = document.querySelector('.p-eplist');
+const SYOSETU_INDEX_FETCH_RETRY_LIMIT = 5;
+const SYOSETU_INDEX_FETCH_DELAY_MS = 1000;
+
+const currentPageIndexBox = document.querySelector(".p-eplist");
 
 // Attempt to get the first and last page anchors
-const firstPageAnchor = document.querySelector('.c-pager__item--first');
-const lastPageAnchor = document.querySelector('.c-pager__item--last');
+const firstPageAnchor = document.querySelector(".c-pager__item--first");
+const lastPageAnchor = document.querySelector(".c-pager__item--last");
 
-if (firstPageAnchor && lastPageAnchor) {
+if (currentPageIndexBox && firstPageAnchor && lastPageAnchor) {
   // Fallback to the current URL if href is null, it means we're on the last or first page
   const currentURL = window.location.pathname + window.location.search;
-  const lastPageHref = lastPageAnchor.getAttribute('href') ? lastPageAnchor.getAttribute('href'): currentURL;
-  const firstPageHref = firstPageAnchor.getAttribute('href') ? firstPageAnchor.getAttribute('href'): currentURL;
+  const lastPageHref = lastPageAnchor.getAttribute("href") ?? currentURL;
+  const firstPageHref = firstPageAnchor.getAttribute("href") ?? currentURL;
 
   // Extract the page numbers from the URLs
-  const hrefLastPageMatch = lastPageHref ? lastPageHref.match(/(.*\/\?p=)(\d+)/) : null;
-  const hrefFirstPageMatch = firstPageHref ? firstPageHref.match(/(.*\/\?p=)(\d+)/) : null;
+  const hrefLastPageMatch = lastPageHref.match(/(.*\/\?p=)(\d+)/);
+  const hrefFirstPageMatch = firstPageHref.match(/(.*\/\?p=)(\d+)/);
 
-  const baseUrl = hrefLastPageMatch ? hrefLastPageMatch[1] : hrefFirstPageMatch ? hrefFirstPageMatch[1] : '';
-  const lastPageNumber = hrefLastPageMatch ? parseInt(hrefLastPageMatch[2], 10) : 1;
+  const baseUrl = hrefLastPageMatch
+    ? hrefLastPageMatch[1]
+    : hrefFirstPageMatch
+      ? hrefFirstPageMatch[1]
+      : "";
+  const lastPageNumber = hrefLastPageMatch
+    ? parseInt(hrefLastPageMatch[2], 10)
+    : 1;
   const currentPageNumberMatch = currentURL.match(/(.*\/\?p=)(\d+)/);
-  const currentPageNumber = currentPageNumberMatch ? parseInt(currentPageNumberMatch[2], 10) : 1;
+  const currentPageNumber = currentPageNumberMatch
+    ? parseInt(currentPageNumberMatch[2], 10)
+    : 1;
 
-  // Function to fetch content and append children, modified to return the fetch Promise
-  const fetchAndAppendContent = async (pageNumber: number, insertAfterCurrentBox: boolean) => {
-    try {
-      const response = await fetch(`${baseUrl}${pageNumber}`);
-      const html = await response.text();
-      const parser = new DOMParser();
-      const doc = parser.parseFromString(html, 'text/html');
-      const pageIndexBox = doc.querySelector('.p-eplist');
-      if (pageIndexBox && currentPageIndexBox) {
-        const childrenArray = Array.from(pageIndexBox.children);
-        if (insertAfterCurrentBox) {
-          childrenArray.forEach(child => {
-            currentPageIndexBox.appendChild(child.cloneNode(true));
-          });
-        } else {
-          childrenArray.reverse().forEach(child => {
-            currentPageIndexBox.insertBefore(child.cloneNode(true), currentPageIndexBox.firstChild);
-          });
+  const sleep = (delay: number) =>
+    new Promise((resolve) => window.setTimeout(resolve, delay));
+
+  const fetchIndexPage = async (pageNumber: number) => {
+    const pageUrl = `${baseUrl}${pageNumber}`;
+    let lastError: unknown;
+
+    for (
+      let attempt = 1;
+      attempt <= SYOSETU_INDEX_FETCH_RETRY_LIMIT;
+      attempt++
+    ) {
+      try {
+        const response = await fetch(pageUrl, { credentials: "same-origin" });
+        if (!response.ok) {
+          throw new Error(`HTTP ${response.status}`);
+        }
+
+        const html = await response.text();
+        const doc = new DOMParser().parseFromString(html, "text/html");
+        const pageIndexBox = doc.querySelector(".p-eplist");
+        if (!pageIndexBox) {
+          throw new Error("episode list is missing from the response");
+        }
+        return pageIndexBox;
+      } catch (error) {
+        lastError = error;
+        if (attempt < SYOSETU_INDEX_FETCH_RETRY_LIMIT) {
+          await sleep(SYOSETU_INDEX_FETCH_DELAY_MS * attempt);
         }
       }
-    } catch (error) {
-      console.error('Error fetching page:', error);
+    }
+
+    throw new Error(
+      `Failed to fetch Syosetu index page ${pageNumber} after ${SYOSETU_INDEX_FETCH_RETRY_LIMIT} attempts: ${String(lastError)}`,
+    );
+  };
+
+  const fetchAndAppendContent = async (
+    pageNumber: number,
+    insertAfterCurrentBox: boolean,
+  ) => {
+    const pageIndexBox = await fetchIndexPage(pageNumber);
+    const childrenArray = Array.from(pageIndexBox.children);
+    if (insertAfterCurrentBox) {
+      childrenArray.forEach((child) => {
+        currentPageIndexBox.appendChild(child.cloneNode(true));
+      });
+    } else {
+      childrenArray.reverse().forEach((child) => {
+        currentPageIndexBox.insertBefore(
+          child.cloneNode(true),
+          currentPageIndexBox.firstChild,
+        );
+      });
     }
   };
 
@@ -51,16 +95,12 @@ if (firstPageAnchor && lastPageAnchor) {
   for (let i = currentPageNumber - 1; i > 0; i--) {
     await fetchAndAppendContent(i, false);
   }
-  
-  // If lastPageNumber is -1, it indicates we are on the last page
-  const endPageNumber = lastPageNumber === -1 ? currentPageNumber : lastPageNumber;
-  
-  // Fetch next pages' content
-  for (let i = currentPageNumber + 1; i <= endPageNumber; i++) {
-    await fetchAndAppendContent(i, true);
-  }  
-}
 
+  // Fetch next pages' content
+  for (let i = currentPageNumber + 1; i <= lastPageNumber; i++) {
+    await fetchAndAppendContent(i, true);
+  }
+}
 
 export const syosetu = () => {
   const getIntroDom = () => {
@@ -72,7 +112,7 @@ export const syosetu = () => {
   };
   const getAList = () => {
     const _aList = document.querySelectorAll(
-      "body > div.l-container > main > article > div.p-eplist > div > a"
+      "body > div.l-container > main > article > div.p-eplist > div > a",
     );
     if (_aList.length !== 0) {
       return _aList;
@@ -96,11 +136,8 @@ export const syosetu = () => {
     bookname: (
       document.querySelector(".p-novel__title") as HTMLElement
     ).innerText.trim(),
-    author: (
-      document.querySelector(
-        "div.p-novel__author"
-      ) as HTMLAnchorElement
-    ).innerText,
+    author: (document.querySelector("div.p-novel__author") as HTMLAnchorElement)
+      .innerText,
     introDom: getIntroDom(),
     introDomPatch: (dom) => dom,
     coverUrl: null,
@@ -110,7 +147,9 @@ export const syosetu = () => {
     getContent: (dom) => {
       const content = document.createElement("div");
       const novelP = dom.querySelector(".p-novel__text--preface");
-      const novelHonbun = dom.querySelector(".p-novel__text:not(.p-novel__text--preface):not(.p-novel__text--afterword)");
+      const novelHonbun = dom.querySelector(
+        ".p-novel__text:not(.p-novel__text--preface):not(.p-novel__text--afterword)",
+      );
       const novelA = dom.querySelector(".p-novel__text--afterword");
       if (novelP) {
         content.appendChild(novelP);
@@ -138,7 +177,7 @@ export const syosetuOrg = () => {
   const getAList = () => {
     const _aList = document.querySelectorAll(
       "section.episode-list li.episode-list__item > a.episode-list__link, " +
-        'tr[class^="bgcolor"] > td > a'
+        'tr[class^="bgcolor"] > td > a',
     );
     if (_aList.length !== 0) {
       return _aList;
@@ -148,7 +187,7 @@ export const syosetuOrg = () => {
       a.innerText = (
         document.querySelector(
           'div.ss > span[itemprop="name"], ' +
-            "div.ss:nth-child(1) > p:nth-child(1) > span:nth-child(1) > a:nth-child(1)"
+            "div.ss:nth-child(1) > p:nth-child(1) > span:nth-child(1) > a:nth-child(1)",
         ) as HTMLElement
       )?.innerText;
       return [a];
@@ -170,12 +209,12 @@ export const syosetuOrg = () => {
     bookUrl: document.location.href,
     bookname: (
       document.querySelector(
-        'div.ss > span[itemprop="name"], div.ss:nth-child(1) > p:nth-child(1) > span:nth-child(1) > a:nth-child(1)'
+        'div.ss > span[itemprop="name"], div.ss:nth-child(1) > p:nth-child(1) > span:nth-child(1) > a:nth-child(1)',
       ) as HTMLElement
     ).innerText.trim(),
     author: (
       document.querySelector(
-        'div.ss span[itemprop="author"] > a, div.ss:nth-child(1) > p:nth-child(1) > a:nth-child(2)'
+        'div.ss span[itemprop="author"] > a, div.ss:nth-child(1) > p:nth-child(1) > a:nth-child(2)',
       ) as HTMLAnchorElement
     )?.innerText.trim(),
     introDom: getIntroDom(),
@@ -184,8 +223,8 @@ export const syosetuOrg = () => {
     additionalMetadatePatch: (additionalMetadate) => {
       additionalMetadate.tags = Array.from(
         document.querySelectorAll(
-          'span[itemprop="keywords"] > a, a.alert_color'
-        )
+          'span[itemprop="keywords"] > a, a.alert_color',
+        ),
       ).map((a) => (a as HTMLAnchorElement).innerText);
       return additionalMetadate;
     },
@@ -196,7 +235,7 @@ export const syosetuOrg = () => {
       )?.innerText.trim() ?? (a as HTMLElement).innerText.trim(),
     sections: document.querySelectorAll(
       "section.episode-list li.episode-list__chapter > .episode-list__chapter-title, " +
-        'div.ss > table > tbody > tr > td[colspan="2"] > strong'
+        'div.ss > table > tbody > tr > td[colspan="2"] > strong',
     ),
     getSName: (dom) => (dom as HTMLElement).innerText.trim(),
     getContent: (doc) => {
